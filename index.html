@@ -354,7 +354,13 @@
 
             <!-- RSVP Status Note (shown if user has already responded on this device) -->
             <div id="rsvp-status-note" class="text-center my-1.5 no-print hidden">
-                <span id="rsvp-status-text" class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-medium shadow-2xs"></span>
+                <div class="inline-flex flex-wrap items-center justify-center gap-2">
+                    <span id="rsvp-status-text" class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-medium shadow-2xs"></span>
+                    <button id="card-cancel-btn" onclick="cancelAttendanceConfirmation()" type="button"
+                        class="hidden text-[11px] text-gray-400 hover:text-red-500 transition-colors underline decoration-dotted">
+                        Cancel confirmation
+                    </button>
+                </div>
             </div>
 
             <!-- Notice & Signature Section -->
@@ -400,6 +406,14 @@
                 class="px-6 py-2.5 border border-navy text-navy hover:bg-navy hover:text-white rounded-md transition-colors w-full font-medium text-xs sm:text-sm">
                 Close
             </button>
+
+            <!-- Optional subtle cancel option (only shown after confirming attendance) -->
+            <div id="modal-cancel-container" class="mt-3.5 pt-2.5 border-t border-gray-100 hidden">
+                <button type="button" id="modal-cancel-btn" onclick="cancelAttendanceConfirmation()"
+                    class="text-[11px] sm:text-xs text-gray-400 hover:text-red-500 transition-colors underline decoration-dotted">
+                    Cancel my attendance confirmation
+                </button>
+            </div>
         </div>
     </div>
 
@@ -418,6 +432,9 @@
         const calendarLink = document.getElementById('calendar-link');
         const rsvpStatusNote = document.getElementById('rsvp-status-note');
         const rsvpStatusText = document.getElementById('rsvp-status-text');
+        const modalCancelContainer = document.getElementById('modal-cancel-container');
+        const modalCancelBtn = document.getElementById('modal-cancel-btn');
+        const cardCancelBtn = document.getElementById('card-cancel-btn');
 
         // =========================================================================
         // Supabase Database Configuration
@@ -477,13 +494,21 @@
             if (savedStatus === 'accepted') {
                 rsvpStatusNote.classList.remove('hidden');
                 rsvpStatusText.className = "inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-medium bg-emerald-50 text-emerald-800 border border-emerald-200";
-                rsvpStatusText.innerHTML = '<i class="fa-solid fa-circle-check text-emerald-600"></i> You confirmed attendance on this device. (Click to change)';
+                rsvpStatusText.innerHTML = '<i class="fa-solid fa-circle-check text-emerald-600"></i> You confirmed attendance on this device.';
+                if (cardCancelBtn) cardCancelBtn.classList.remove('hidden');
             } else if (savedStatus === 'declined') {
                 rsvpStatusNote.classList.remove('hidden');
                 rsvpStatusText.className = "inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-medium bg-slate-100 text-slate-700 border border-slate-200";
-                rsvpStatusText.innerHTML = '<i class="fa-solid fa-envelope-open text-slate-400"></i> You recorded regrets on this device. (Click to change)';
+                rsvpStatusText.innerHTML = '<i class="fa-solid fa-envelope-open text-slate-400"></i> You recorded regrets on this device.';
+                if (cardCancelBtn) cardCancelBtn.classList.add('hidden');
+            } else if (savedStatus === 'cancelled') {
+                rsvpStatusNote.classList.remove('hidden');
+                rsvpStatusText.className = "inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-medium bg-gray-100 text-gray-600 border border-gray-200";
+                rsvpStatusText.innerHTML = '<i class="fa-solid fa-circle-xmark text-gray-400"></i> Attendance confirmation cancelled on this device.';
+                if (cardCancelBtn) cardCancelBtn.classList.add('hidden');
             } else {
                 rsvpStatusNote.classList.add('hidden');
+                if (cardCancelBtn) cardCancelBtn.classList.add('hidden');
             }
         }
 
@@ -593,6 +618,9 @@
                 if (calendarContainer) {
                     calendarContainer.classList.remove('hidden');
                 }
+                if (modalCancelContainer) {
+                    modalCancelContainer.classList.remove('hidden');
+                }
             } else {
                 modalIcon.innerHTML = '<i class="fa-solid fa-envelope-open text-gray-400"></i>';
                 modalTitle.textContent = "Regrets Received";
@@ -600,10 +628,75 @@
                 if (calendarContainer) {
                     calendarContainer.classList.add('hidden');
                 }
+                if (modalCancelContainer) {
+                    modalCancelContainer.classList.add('hidden');
+                }
             }
 
             if (acceptBtn) acceptBtn.disabled = false;
             if (declineBtn) declineBtn.disabled = false;
+            openModal();
+        }
+
+        // Cancel Attendance Confirmation Logic (Subtle option to cancel confirmation)
+        async function cancelAttendanceConfirmation() {
+            const acceptBtn = document.getElementById('accept-rsvp-btn');
+            const declineBtn = document.getElementById('decline-rsvp-btn');
+            if (modalCancelBtn) modalCancelBtn.disabled = true;
+            if (cardCancelBtn) cardCancelBtn.disabled = true;
+            if (acceptBtn) acceptBtn.disabled = true;
+            if (declineBtn) declineBtn.disabled = true;
+
+            const visitorId = getVisitorId();
+            try {
+                localStorage.setItem('moramaths-agm-2026-user-rsvp', 'cancelled');
+            } catch (e) {}
+
+            updateRSVPStatusUI();
+
+            if (supabaseClient) {
+                try {
+                    const { error } = await supabaseClient
+                        .from(RSVP_TABLE)
+                        .upsert([{
+                            visitor_id: visitorId,
+                            event: 'agm-2026',
+                            status: 'cancelled',
+                            updated_at: new Date().toISOString()
+                        }], { onConflict: 'visitor_id,event' });
+
+                    if (error) {
+                        console.warn('Supabase cancel upsert fallback:', error.message || error);
+                        await supabaseClient
+                            .from(RSVP_TABLE)
+                            .update({
+                                status: 'cancelled',
+                                updated_at: new Date().toISOString()
+                            })
+                            .eq('visitor_id', visitorId)
+                            .eq('event', 'agm-2026');
+                    }
+                } catch (err) {
+                    console.warn('Network error cancelling RSVP:', err);
+                }
+            }
+
+            modalIcon.innerHTML = '<i class="fa-solid fa-circle-xmark text-gray-400"></i>';
+            modalTitle.textContent = "Attendance Cancelled";
+            modalMessage.textContent = "Your attendance confirmation has been cancelled and our records have been updated. If your schedule allows later, you are always welcome to confirm again.";
+
+            if (calendarContainer) {
+                calendarContainer.classList.add('hidden');
+            }
+            if (modalCancelContainer) {
+                modalCancelContainer.classList.add('hidden');
+            }
+
+            if (modalCancelBtn) modalCancelBtn.disabled = false;
+            if (cardCancelBtn) cardCancelBtn.disabled = false;
+            if (acceptBtn) acceptBtn.disabled = false;
+            if (declineBtn) declineBtn.disabled = false;
+
             openModal();
         }
 
