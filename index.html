@@ -12,6 +12,8 @@
         href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;0,700;1,400&family=Inter:wght@300;400;500;600;700&display=swap"
         rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
+    <!-- Supabase JS Client (v2) -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 
     <script>
         tailwind.config = {
@@ -335,13 +337,21 @@
                 </div>
             </div>
 
+            <!-- Discreet Attendance Counter Badge -->
+            <div class="flex items-center justify-center my-1.5 no-print">
+                <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-slate-100/90 border border-slate-200/90 text-[11px] sm:text-xs text-slate-600 font-medium shadow-xs">
+                    <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                    <span id="attendee-count-badge">Loading attendance count...</span>
+                </div>
+            </div>
+
             <!-- RSVP Action Buttons -->
             <div class="flex flex-col sm:flex-row items-center justify-center gap-2.5 sm:gap-4 my-2 sm:my-3 no-print">
-                <button onclick="handleRSVP(true)"
+                <button id="accept-rsvp-btn" onclick="handleRSVP(true)"
                     class="w-full sm:w-auto min-w-[220px] px-6 py-3 bg-navy hover:bg-slate-800 text-white font-medium rounded-md shadow-md hover:shadow-lg transition-all duration-300 flex items-center justify-center gap-2 text-xs sm:text-sm active:scale-[0.98]">
                     <i class="fa-solid fa-check-circle text-gold"></i> Accept & Confirm Attendance
                 </button>
-                <button onclick="handleRSVP(false)"
+                <button id="decline-rsvp-btn" onclick="handleRSVP(false)"
                     class="w-full sm:w-auto px-5 py-2.5 bg-transparent hover:bg-gray-100 text-gray-500 hover:text-navy font-medium rounded-md transition-all duration-300 text-xs sm:text-sm">
                     Decline with Regrets
                 </button>
@@ -376,7 +386,13 @@
             id="modal-content">
             <div id="modal-icon" class="text-4xl mb-3"></div>
             <h3 id="modal-title" class="text-xl sm:text-2xl font-serif font-bold text-navy mb-2"></h3>
-            <p id="modal-message" class="text-gray-600 mb-5 text-xs sm:text-sm leading-relaxed"></p>
+            <p id="modal-message" class="text-gray-600 mb-4 text-xs sm:text-sm leading-relaxed"></p>
+
+            <!-- Attendee count in modal -->
+            <div id="modal-attendee-stat" class="mb-5 py-2 px-3 bg-amber-50/70 border border-gold/30 rounded-md text-xs text-navy font-medium hidden">
+                <i class="fa-solid fa-users text-gold mr-1.5"></i>
+                <span id="modal-attendee-count-text"></span>
+            </div>
 
             <div id="calendar-link-container" class="mb-5 hidden">
                 <a id="calendar-link" href="#" target="_blank"
@@ -405,28 +421,27 @@
         const modalMessage = document.getElementById('modal-message');
         const calendarContainer = document.getElementById('calendar-link-container');
         const calendarLink = document.getElementById('calendar-link');
+        const modalAttendeeStat = document.getElementById('modal-attendee-stat');
+        const modalAttendeeCountText = document.getElementById('modal-attendee-count-text');
+        const attendeeCountBadge = document.getElementById('attendee-count-badge');
 
-        const agendaContent = document.getElementById('agenda-content');
-        const agendaToggleBtn = document.getElementById('agenda-toggle-btn');
-        const agendaToggleText = document.getElementById('agenda-toggle-text');
-        const agendaToggleIcon = document.getElementById('agenda-toggle-icon');
+        // =========================================================================
+        // Supabase Database Configuration
+        // Paste your project values from: Supabase Dashboard -> Project Settings -> API
+        // =========================================================================
+        const SUPABASE_URL = ''; // e.g. 'https://xyzabcdef.supabase.co'
+        const SUPABASE_ANON_KEY = ''; // e.g. 'eyJhbGciOiJIUzI1NiIsInR5cCI6...'
+        const RSVP_TABLE = 'rsvp_responses';
 
         const ACCEPT_COUNT_KEY = 'moramaths-agm-2026-accept-count';
-        const STARTING_ACCEPT_COUNT = 45;
+        const STARTING_ACCEPT_COUNT = 48; // Fallback starting baseline
 
-        // Toggle Agenda details
-        function toggleAgenda() {
-            const isHidden = agendaContent.classList.contains('hidden');
-            if (isHidden) {
-                agendaContent.classList.remove('hidden');
-                agendaToggleText.textContent = 'Hide Schedule';
-                agendaToggleIcon.classList.add('rotate-180');
-                agendaToggleBtn.setAttribute('aria-expanded', 'true');
-            } else {
-                agendaContent.classList.add('hidden');
-                agendaToggleText.textContent = 'View Schedule';
-                agendaToggleIcon.classList.remove('rotate-180');
-                agendaToggleBtn.setAttribute('aria-expanded', 'false');
+        let supabaseClient = null;
+        if (typeof window.supabase !== 'undefined' && SUPABASE_URL && SUPABASE_ANON_KEY && !SUPABASE_URL.includes('xyzabcdef')) {
+            try {
+                supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+            } catch (err) {
+                console.warn('Supabase initialization failed:', err);
             }
         }
 
@@ -446,6 +461,87 @@
                 console.warn('Unable to save RSVP count locally:', error);
             }
         }
+
+        function updateAttendeeDisplays(count) {
+            if (attendeeCountBadge) {
+                attendeeCountBadge.textContent = `${count} members confirmed attending`;
+            }
+            if (modalAttendeeCountText && modalAttendeeStat) {
+                modalAttendeeStat.classList.remove('hidden');
+                modalAttendeeCountText.textContent = count > 1
+                    ? `You and ${count - 1} other members have confirmed attendance`
+                    : `You are the first member confirmed attending!`;
+            }
+        }
+
+        // Fetch live count from Supabase (or localStorage fallback)
+        async function fetchLiveAttendeeCount() {
+            if (supabaseClient) {
+                try {
+                    const { count, error } = await supabaseClient
+                        .from(RSVP_TABLE)
+                        .select('*', { count: 'exact', head: true })
+                        .eq('status', 'accepted');
+
+                    if (!error && typeof count === 'number') {
+                        setLocalAcceptCount(count);
+                        updateAttendeeDisplays(count);
+                        return count;
+                    }
+                } catch (err) {
+                    console.warn('Supabase fetch count failed, using local count:', err);
+                }
+            }
+            const local = getLocalAcceptCount();
+            updateAttendeeDisplays(local);
+            return local;
+        }
+
+        // Record RSVP in Supabase and update counts
+        async function recordRSVPResponse(isAttending) {
+            const status = isAttending ? 'accepted' : 'declined';
+            let currentCount = getLocalAcceptCount();
+
+            if (isAttending) {
+                currentCount += 1;
+                setLocalAcceptCount(currentCount);
+                updateAttendeeDisplays(currentCount);
+            }
+
+            if (supabaseClient) {
+                try {
+                    const { error } = await supabaseClient
+                        .from(RSVP_TABLE)
+                        .insert([{
+                            status: status,
+                            event: 'agm-2026'
+                        }]);
+
+                    if (error) {
+                        console.warn('Error inserting into Supabase:', error);
+                    } else if (isAttending) {
+                        // Re-fetch exact database count
+                        const { count, error: countErr } = await supabaseClient
+                            .from(RSVP_TABLE)
+                            .select('*', { count: 'exact', head: true })
+                            .eq('status', 'accepted');
+
+                        if (!countErr && typeof count === 'number') {
+                            currentCount = count;
+                            setLocalAcceptCount(currentCount);
+                            updateAttendeeDisplays(currentCount);
+                        }
+                    }
+                } catch (err) {
+                    console.warn('Network error recording to Supabase:', err);
+                }
+            }
+
+            return currentCount;
+        }
+
+        // Initialize count on page load
+        fetchLiveAttendeeCount();
 
         // Document Open Logic
         function openEnvelope() {
@@ -473,41 +569,32 @@
         // Google Calendar Link Builder
         function getGoogleCalendarUrl() {
             const title = encodeURIComponent("Annual General Meeting 2026 — Mathematics Society, University of Moratuwa");
-            // 14th Oct 2026, 18:00 to 21:00 SLT (UTC+5:30 -> 12:30 to 15:30 UTC)
-            const dates = "20261014T123000Z/20261014T153000Z";
+            // 14th Oct 2026, 18:30 to 21:30 SLT (UTC+5:30 -> 13:00 to 16:00 UTC)
+            const dates = "20261014T130000Z/20261014T160000Z";
             const details = encodeURIComponent(
                 "Annual General Meeting (AGM) 2026 of the Mathematics Society, University of Moratuwa.\n\n" +
-                "Date: Wednesday, 14th October 2026 at 6:00 PM\n" +
-                "Venue: Auditorium / Dept. of Mathematics, University of Moratuwa\n\n" +
-                "General Agenda:\n" +
-                "1. Lighting of the Oil Lamp\n" +
-                "2. Welcome & President's Address (Outgoing President)\n" +
-                "3. Minutes of Last Year (Outgoing Secretary)\n" +
-                "4. Financial Report (Outgoing Jr. Treasurer)\n" +
-                "5. Address by Staff Advisor\n" +
-                "6. Recognition of Outstanding Projects (Enigma, SLYMC - Certificates for Chairs)\n" +
-                "7. Distribution of Certificates for Committee\n" +
-                "8. Distribution of Service Letters for Project Contributors\n" +
-                "9. Election of President (Outgoing President)\n" +
-                "10. Election of Executive Board (New President)\n" +
-                "11. Address by New President\n" +
-                "12. Distribution of Certificates for Outgoing Board\n" +
-                "13. Tokens of Appreciation\n" +
-                "14. Vote of Thanks (New Secretary)"
+                "Date: Wednesday, 14th October 2026 at 6:30 PM\n" +
+                "Venue: ENTC 1 Hall, University of Moratuwa\n\n" +
+                "Key Highlights:\n" +
+                "- Awarding of Service Letters and Certificates of Appreciation to all project contributors and committee members.\n" +
+                "- Election and Handover of the new Executive Board (2026/2027)."
             );
-            const location = encodeURIComponent("Department of Mathematics / Auditorium, University of Moratuwa");
+            const location = encodeURIComponent("ENTC 1 Hall, University of Moratuwa");
             return `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${title}&dates=${dates}&details=${details}&location=${location}`;
         }
 
         // RSVP Logic
         async function handleRSVP(isAttending) {
+            const acceptBtn = document.getElementById('accept-rsvp-btn');
+            if (acceptBtn) acceptBtn.disabled = true;
+
+            const updatedCount = await recordRSVPResponse(isAttending);
+
             if (isAttending) {
-                const count = getLocalAcceptCount() + 1;
-                setLocalAcceptCount(count);
                 fireConfetti();
                 modalIcon.innerHTML = '<i class="fa-solid fa-circle-check text-gold"></i>';
                 modalTitle.textContent = "Attendance Confirmed";
-                modalMessage.textContent = "We look forward to welcoming you to the Annual General Meeting 2026 on Wednesday, 14th October at 6:00 PM. Please be present to collect your official service letter and participate in shaping the society's upcoming term.";
+                modalMessage.textContent = "We look forward to welcoming you to the Annual General Meeting 2026 on Wednesday, 14th October at 6:30 PM at ENTC 1 Hall. Please be present to collect your official service letter and participate in shaping the society's upcoming term.";
 
                 if (calendarLink) {
                     calendarLink.href = getGoogleCalendarUrl();
@@ -522,7 +609,12 @@
                 if (calendarContainer) {
                     calendarContainer.classList.add('hidden');
                 }
+                if (modalAttendeeStat) {
+                    modalAttendeeStat.classList.add('hidden');
+                }
             }
+
+            if (acceptBtn) acceptBtn.disabled = false;
             openModal();
         }
 
@@ -579,9 +671,6 @@
             if (documentCover) {
                 documentCover.style.display = 'none';
             }
-        }
-        if (window.location.hash.includes('agenda')) {
-            toggleAgenda();
         }
     </script>
 </body>
