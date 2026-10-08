@@ -14,6 +14,8 @@
     <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
     <!-- Supabase JS Client (v2) -->
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <!-- Optional External Config (from config.js) -->
+    <script src="config.js" onerror="/* config.js is optional */"></script>
 
     <script>
         tailwind.config = {
@@ -337,13 +339,6 @@
                 </div>
             </div>
 
-            <!-- Discreet Attendance Counter Badge -->
-            <div class="flex items-center justify-center my-1.5 no-print">
-                <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-slate-100/90 border border-slate-200/90 text-[11px] sm:text-xs text-slate-600 font-medium shadow-xs">
-                    <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                    <span id="attendee-count-badge">Loading attendance count...</span>
-                </div>
-            </div>
 
             <!-- RSVP Action Buttons -->
             <div class="flex flex-col sm:flex-row items-center justify-center gap-2.5 sm:gap-4 my-2 sm:my-3 no-print">
@@ -355,6 +350,11 @@
                     class="w-full sm:w-auto px-5 py-2.5 bg-transparent hover:bg-gray-100 text-gray-500 hover:text-navy font-medium rounded-md transition-all duration-300 text-xs sm:text-sm">
                     Decline with Regrets
                 </button>
+            </div>
+
+            <!-- RSVP Status Note (shown if user has already responded on this device) -->
+            <div id="rsvp-status-note" class="text-center my-1.5 no-print hidden">
+                <span id="rsvp-status-text" class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-medium shadow-2xs"></span>
             </div>
 
             <!-- Notice & Signature Section -->
@@ -388,11 +388,6 @@
             <h3 id="modal-title" class="text-xl sm:text-2xl font-serif font-bold text-navy mb-2"></h3>
             <p id="modal-message" class="text-gray-600 mb-4 text-xs sm:text-sm leading-relaxed"></p>
 
-            <!-- Attendee count in modal -->
-            <div id="modal-attendee-stat" class="mb-5 py-2 px-3 bg-amber-50/70 border border-gold/30 rounded-md text-xs text-navy font-medium hidden">
-                <i class="fa-solid fa-users text-gold mr-1.5"></i>
-                <span id="modal-attendee-count-text"></span>
-            </div>
 
             <div id="calendar-link-container" class="mb-5 hidden">
                 <a id="calendar-link" href="#" target="_blank"
@@ -421,127 +416,121 @@
         const modalMessage = document.getElementById('modal-message');
         const calendarContainer = document.getElementById('calendar-link-container');
         const calendarLink = document.getElementById('calendar-link');
-        const modalAttendeeStat = document.getElementById('modal-attendee-stat');
-        const modalAttendeeCountText = document.getElementById('modal-attendee-count-text');
-        const attendeeCountBadge = document.getElementById('attendee-count-badge');
+        const rsvpStatusNote = document.getElementById('rsvp-status-note');
+        const rsvpStatusText = document.getElementById('rsvp-status-text');
 
         // =========================================================================
         // Supabase Database Configuration
-        // Paste your project values from: Supabase Dashboard -> Project Settings -> API
+        // Loaded from config.js (window.ENV) if present, or configure directly here:
         // =========================================================================
-        const SUPABASE_URL = ''; // e.g. 'https://xyzabcdef.supabase.co'
-        const SUPABASE_ANON_KEY = ''; // e.g. 'eyJhbGciOiJIUzI1NiIsInR5cCI6...'
-        const RSVP_TABLE = 'rsvp_responses';
-
-        const ACCEPT_COUNT_KEY = 'moramaths-agm-2026-accept-count';
-        const STARTING_ACCEPT_COUNT = 48; // Fallback starting baseline
+        const SUPABASE_URL = (window.ENV && window.ENV.SUPABASE_URL) || '';
+        const SUPABASE_ANON_KEY = (window.ENV && window.ENV.SUPABASE_ANON_KEY) || '';
+        const RSVP_TABLE = (window.ENV && window.ENV.RSVP_TABLE) || 'rsvp_responses';
 
         let supabaseClient = null;
-        if (typeof window.supabase !== 'undefined' && SUPABASE_URL && SUPABASE_ANON_KEY && !SUPABASE_URL.includes('xyzabcdef')) {
+        if (typeof window.supabase !== 'undefined' && SUPABASE_URL && SUPABASE_ANON_KEY && !SUPABASE_URL.includes('your-project-id')) {
             try {
                 supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
             } catch (err) {
-                console.warn('Supabase initialization failed:', err);
+                console.warn('Supabase initialization error:', err);
             }
         }
 
-        function getLocalAcceptCount() {
+        // =========================================================================
+        // Visitor Identification & Deduplication (Avoid Multiple Counts per Person)
+        // =========================================================================
+        function getVisitorId() {
+            // 1. Support personal links if sent with ?id=..., ?uid=..., or ?member=...
             try {
-                const saved = localStorage.getItem(ACCEPT_COUNT_KEY);
-                return saved ? Number(saved) : STARTING_ACCEPT_COUNT;
-            } catch (error) {
-                return STARTING_ACCEPT_COUNT;
-            }
-        }
-
-        function setLocalAcceptCount(count) {
-            try {
-                localStorage.setItem(ACCEPT_COUNT_KEY, String(count));
-            } catch (error) {
-                console.warn('Unable to save RSVP count locally:', error);
-            }
-        }
-
-        function updateAttendeeDisplays(count) {
-            if (attendeeCountBadge) {
-                attendeeCountBadge.textContent = `${count} members confirmed attending`;
-            }
-            if (modalAttendeeCountText && modalAttendeeStat) {
-                modalAttendeeStat.classList.remove('hidden');
-                modalAttendeeCountText.textContent = count > 1
-                    ? `You and ${count - 1} other members have confirmed attendance`
-                    : `You are the first member confirmed attending!`;
-            }
-        }
-
-        // Fetch live count from Supabase (or localStorage fallback)
-        async function fetchLiveAttendeeCount() {
-            if (supabaseClient) {
-                try {
-                    const { count, error } = await supabaseClient
-                        .from(RSVP_TABLE)
-                        .select('*', { count: 'exact', head: true })
-                        .eq('status', 'accepted');
-
-                    if (!error && typeof count === 'number') {
-                        setLocalAcceptCount(count);
-                        updateAttendeeDisplays(count);
-                        return count;
-                    }
-                } catch (err) {
-                    console.warn('Supabase fetch count failed, using local count:', err);
+                const urlParams = new URLSearchParams(window.location.search);
+                const urlId = urlParams.get('id') || urlParams.get('uid') || urlParams.get('member');
+                if (urlId) {
+                    return 'member_' + encodeURIComponent(urlId.trim());
                 }
+            } catch (e) {}
+
+            // 2. Otherwise persist a unique browser UUID in localStorage per device
+            const STORAGE_KEY = 'moramaths-agm-visitor-uuid';
+            let visitorId = null;
+            try {
+                visitorId = localStorage.getItem(STORAGE_KEY);
+                if (!visitorId) {
+                    visitorId = (typeof crypto !== 'undefined' && crypto.randomUUID)
+                        ? crypto.randomUUID()
+                        : 'visitor_' + Date.now() + '_' + Math.random().toString(36).substring(2, 10);
+                    localStorage.setItem(STORAGE_KEY, visitorId);
+                }
+            } catch (e) {
+                visitorId = 'temp_' + Date.now();
             }
-            const local = getLocalAcceptCount();
-            updateAttendeeDisplays(local);
-            return local;
+            return visitorId;
         }
 
-        // Record RSVP in Supabase and update counts
+        function updateRSVPStatusUI() {
+            let savedStatus = null;
+            try {
+                savedStatus = localStorage.getItem('moramaths-agm-2026-user-rsvp');
+            } catch (e) {}
+
+            if (!rsvpStatusNote || !rsvpStatusText) return;
+
+            if (savedStatus === 'accepted') {
+                rsvpStatusNote.classList.remove('hidden');
+                rsvpStatusText.className = "inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-medium bg-emerald-50 text-emerald-800 border border-emerald-200";
+                rsvpStatusText.innerHTML = '<i class="fa-solid fa-circle-check text-emerald-600"></i> You confirmed attendance on this device. (Click to change)';
+            } else if (savedStatus === 'declined') {
+                rsvpStatusNote.classList.remove('hidden');
+                rsvpStatusText.className = "inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-medium bg-slate-100 text-slate-700 border border-slate-200";
+                rsvpStatusText.innerHTML = '<i class="fa-solid fa-envelope-open text-slate-400"></i> You recorded regrets on this device. (Click to change)';
+            } else {
+                rsvpStatusNote.classList.add('hidden');
+            }
+        }
+
+        // Record RSVP in Supabase database with UPSERT (Prevents duplicate counts)
         async function recordRSVPResponse(isAttending) {
             const status = isAttending ? 'accepted' : 'declined';
-            let currentCount = getLocalAcceptCount();
+            const visitorId = getVisitorId();
 
-            if (isAttending) {
-                currentCount += 1;
-                setLocalAcceptCount(currentCount);
-                updateAttendeeDisplays(currentCount);
-            }
+            try {
+                localStorage.setItem('moramaths-agm-2026-user-rsvp', status);
+            } catch (e) {}
+
+            updateRSVPStatusUI();
 
             if (supabaseClient) {
                 try {
+                    // Using UPSERT on (visitor_id, event): Updates the single row instead of adding duplicates
                     const { error } = await supabaseClient
                         .from(RSVP_TABLE)
-                        .insert([{
+                        .upsert([{
+                            visitor_id: visitorId,
+                            event: 'agm-2026',
                             status: status,
-                            event: 'agm-2026'
-                        }]);
+                            updated_at: new Date().toISOString()
+                        }], { onConflict: 'visitor_id,event' });
 
                     if (error) {
-                        console.warn('Error inserting into Supabase:', error);
-                    } else if (isAttending) {
-                        // Re-fetch exact database count
-                        const { count, error: countErr } = await supabaseClient
-                            .from(RSVP_TABLE)
-                            .select('*', { count: 'exact', head: true })
-                            .eq('status', 'accepted');
-
-                        if (!countErr && typeof count === 'number') {
-                            currentCount = count;
-                            setLocalAcceptCount(currentCount);
-                            updateAttendeeDisplays(currentCount);
+                        console.warn('Supabase upsert status:', error.message || error);
+                        // Fallback attempt: simple insert if unique constraint not yet created
+                        if (error.code === '42P10' || error.message?.includes('conflict') || error.message?.includes('column')) {
+                            await supabaseClient
+                                .from(RSVP_TABLE)
+                                .insert([{
+                                    visitor_id: visitorId,
+                                    event: 'agm-2026',
+                                    status: status
+                                }]);
                         }
                     }
                 } catch (err) {
                     console.warn('Network error recording to Supabase:', err);
                 }
             }
-
-            return currentCount;
         }
 
-        // Initialize count on page load
-        fetchLiveAttendeeCount();
+        // Initialize user RSVP status badge on page load
+        updateRSVPStatusUI();
 
         // Document Open Logic
         function openEnvelope() {
@@ -586,9 +575,11 @@
         // RSVP Logic
         async function handleRSVP(isAttending) {
             const acceptBtn = document.getElementById('accept-rsvp-btn');
+            const declineBtn = document.getElementById('decline-rsvp-btn');
             if (acceptBtn) acceptBtn.disabled = true;
+            if (declineBtn) declineBtn.disabled = true;
 
-            const updatedCount = await recordRSVPResponse(isAttending);
+            await recordRSVPResponse(isAttending);
 
             if (isAttending) {
                 fireConfetti();
@@ -609,12 +600,10 @@
                 if (calendarContainer) {
                     calendarContainer.classList.add('hidden');
                 }
-                if (modalAttendeeStat) {
-                    modalAttendeeStat.classList.add('hidden');
-                }
             }
 
             if (acceptBtn) acceptBtn.disabled = false;
+            if (declineBtn) declineBtn.disabled = false;
             openModal();
         }
 
